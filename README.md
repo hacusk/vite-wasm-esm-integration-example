@@ -1,26 +1,64 @@
 # vite-wasm-esm-integration-example
 
-Vite の [WebAssembly ESM 統合](https://vite.dev/guide/features#webassembly)を使って、Rust 製 WASM を通常の ES モジュールとして直接インポートするデモ。
-
-```ts
-import { add, fibonacci } from './assets/main.wasm'
-
-console.log(add(1, 2))       // 3
-console.log(fibonacci(10))   // 55
-```
+Vite の [WebAssembly サポート](https://vite.dev/guide/features#webassembly)を使って、Rust 製 WASM を Vue コンポーネントからインポートする 2 つのアプローチのデモ。
 
 ## 構成
 
 ```
 .
-├── wasm/          # Rust — WASM ソース
-└── vite/          # Vue + Vite — フロントエンド
+├── wasm/                      # Rust — WASM ソース（共通）
+├── vite-wasm-instance/        # アプローチ① ?init
+└── vite-wasm-esm-integration/ # アプローチ② ESM 統合
+```
+
+## 2 つのアプローチ
+
+### `vite-wasm-instance` — `?init`
+
+Vite 組み込みの機能。追加プラグイン不要。`init()` を呼んで `WebAssembly.Instance` を取得し、`exports` から関数を取り出す。
+
+```ts
+import wasmInit from '../assets/main.wasm?init'
+
+const instance = await wasmInit()
+const add = instance.exports['add'] as (a: number, b: number) => number
+```
+
+top-level await を使うため、コンポーネントが非同期になる。親で `<Suspense>` が必要。
+
+### `vite-wasm-esm-integration` — ESM 統合
+
+[WebAssembly/ES Module Integration 提案](https://github.com/WebAssembly/esm-integration)に準拠した形。通常の named import と同じ感覚で書ける。
+
+```ts
+import { add, fibonacci } from '../assets/main.wasm'
+```
+
+Vite 8 単体ではブロックされるため [vite-plugin-wasm](https://github.com/Menci/vite-plugin-wasm) が必要。
+
+```ts
+// vite.config.ts
+import wasm from 'vite-plugin-wasm'
+export default defineConfig({ plugins: [wasm(), vue()] })
+```
+
+TypeScript の named import に型を付けるには `.wasm.d.ts` と `allowArbitraryExtensions` が必要。
+
+```ts
+// src/assets/main.wasm.d.ts
+export declare function add(a: number, b: number): number
+export declare function fibonacci(n: number): number
+```
+
+```json
+// tsconfig.app.json
+{ "compilerOptions": { "allowArbitraryExtensions": true } }
 ```
 
 ## なぜ Rust か
 
 `wasm32-unknown-unknown` ターゲットはランタイムを含まない純粋な WASM を出力する。  
-Go/TinyGo は `wasm_exec.js` などのランタイム shim が必要で、`import { add }` の形では使えない。
+Go/TinyGo は `wasm_exec.js` などのランタイム shim が必要なため、`import { add }` の形では使えない。
 
 | | TinyGo | Rust (`wasm32-unknown-unknown`) |
 |---|---|---|
@@ -39,55 +77,26 @@ Go/TinyGo は `wasm_exec.js` などのランタイム shim が必要で、`impor
 rustup target add wasm32-unknown-unknown
 ```
 
-**WASM をビルドして Vite にコピー**
+**WASM をビルド**
 
 ```sh
 cd wasm
 cargo wasm
-cp target/wasm32-unknown-unknown/release/wasm_demo.wasm ../vite/src/assets/main.wasm
+# → target/wasm32-unknown-unknown/release/wasm_demo.wasm
 ```
+
+各プロジェクトの `src/assets/main.wasm` にコピーして使う。
 
 **開発サーバー起動**
 
 ```sh
-cd vite
-pnpm install
-pnpm dev
-```
+# ?init 版
+cd vite-wasm-instance
+pnpm install && pnpm dev
 
-## Vite の設定
-
-Vite 8 単体では直接 `.wasm` インポートがブロックされるため、[vite-plugin-wasm](https://github.com/Menci/vite-plugin-wasm) が必要。
-
-```ts
-// vite/vite.config.ts
-import wasm from 'vite-plugin-wasm'
-
-export default defineConfig({
-  plugins: [wasm(), vue()],
-})
-```
-
-## TypeScript 型
-
-`.wasm.d.ts` ファイルで named import に型を付ける（TypeScript 5.0+ の `allowArbitraryExtensions`）。
-
-```ts
-// vite/src/assets/main.wasm.d.ts
-export declare function add(a: number, b: number): number
-export declare function fibonacci(n: number): number
-```
-
-```json
-// vite/tsconfig.app.json
-{ "compilerOptions": { "allowArbitraryExtensions": true } }
-```
-
-型は `wasm-dis`（binaryen）で WASM のエクスポートシグネチャを確認して手書きする。
-
-```sh
-wasm-dis vite/src/assets/main.wasm
-# → (export "add" (func ...))  type: (param i32 i32) (result i32)
+# ESM 統合版
+cd vite-wasm-esm-integration
+pnpm install && pnpm dev
 ```
 
 ## Rust のコード
@@ -95,15 +104,11 @@ wasm-dis vite/src/assets/main.wasm
 ```rust
 // wasm/src/lib.rs
 #[unsafe(no_mangle)]   // edition 2024 では unsafe が必要
-pub fn add(a: i32, b: i32) -> i32 {
-    a + b
-}
+pub fn add(a: i32, b: i32) -> i32 { a + b }
 
 #[unsafe(no_mangle)]
 pub fn fibonacci(n: i32) -> i32 { /* ... */ }
 ```
-
-`cargo wasm` は `.cargo/config.toml` のエイリアス。
 
 ```toml
 # wasm/.cargo/config.toml
